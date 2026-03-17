@@ -120,21 +120,40 @@ function extractCell(v) {
 
 function parseDate(s){
   if(!s) return null;
+  // Already a Date object (from SheetJS cellDates:true)
+  if(s instanceof Date && !isNaN(s.getTime())) return s;
   // Excel serial number (e.g. 46025 = Jan 3, 2026)
   const num = typeof s === "number" ? s : parseFloat(String(s).trim());
   if (!isNaN(num) && num > 40000 && num < 60000) {
-    const d = new Date((num - 25569) * 86400000); // Excel epoch to JS epoch
+    // Use UTC to avoid timezone shift
+    const d = new Date(Date.UTC(1899, 11, 30 + Math.round(num)));
     if (!isNaN(d.getTime())) return d;
   }
   const str = String(s).trim();
   // "10 Mar 2026" format
   const m = str.match(/^(\d{1,2})\s+([a-z]+)\s+(\d{4})$/i);
   if(m){const mo=MO[m[2].slice(0,3).toLowerCase()];if(mo!==undefined)return new Date(+m[3],mo,+m[1]);}
-  // "2026-03-10" or other JS parseable formats
+  // "03/01/2026" DD/MM/YYYY or MM/DD/YYYY — try both
+  const slash = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if(slash){
+    const a=+slash[1], b=+slash[2], y=+slash[3];
+    // If first number > 12, it must be DD/MM
+    if(a>12) return new Date(y,b-1,a);
+    // If second number > 12, it must be MM/DD
+    if(b>12) return new Date(y,a-1,b);
+    // Ambiguous — assume DD/MM (Indonesian format)
+    return new Date(y,b-1,a);
+  }
+  // "2026-01-03" ISO format
   const d=new Date(str);return isNaN(d.getTime())?null:d;
 }
-function dk(d){return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0");}
-function fmtD(d){return d.getDate()+" "+["Jan","Feb","Mar","Apr","Mei","Jun","Jul","Agu","Sep","Okt","Nov","Des"][d.getMonth()];}
+// Use local time getters consistently
+function fmtD(d){
+  return d.getDate()+" "+["Jan","Feb","Mar","Apr","Mei","Jun","Jul","Agu","Sep","Okt","Nov","Des"][d.getMonth()];
+}
+function dk(d){
+  return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0");
+}
 function fmt(n){if(!isFinite(n)||isNaN(n))return n===Infinity?"∞":"-";return n.toLocaleString("id-ID",{maximumFractionDigits:1});}
 function parseRp(s){if(typeof s==="number")return Math.round(s);const str=String(s||"").trim().replace(/[,\.]\d{2}$/,"").replace(/[^0-9]/g,"");return parseInt(str)||0;}
 const DAYS=["Min","Sen","Sel","Rab","Kam","Jum","Sab"];
@@ -377,7 +396,7 @@ Berikan analisis singkat (3-5 poin):
     const reader = new FileReader();
     reader.onload = (e) => {
       try {
-        const wb = XLSX.read(e.target.result, {type:"array"});
+        const wb = XLSX.read(e.target.result, {type:"array", cellDates:true});
         const ws = wb.Sheets[wb.SheetNames[0]];
         const rows = XLSX.utils.sheet_to_json(ws, {header:1, defval:""});
         // Extract actual values from Google Sheets IFERROR formulas + remove empty rows
