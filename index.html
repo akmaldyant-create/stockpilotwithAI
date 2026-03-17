@@ -10,6 +10,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 :root{--bg:#07090f;--s1:#0f1219;--s2:#181d27;--s3:#252b38;--s4:#333b4a;--fg:#e8ecf2;--f2:#8b95a8;--f3:#565e6e;--accent:#4a90e2;--accent2:#6bb0ff;--red:#e54d4d;--redbg:rgba(229,77,77,.08);--green:#3dbd6f;--orange:#e8943a;--mono:'IBM Plex Mono',monospace;--sans:'Outfit',sans-serif;--r:8px}
@@ -69,6 +70,17 @@ tr.red td{background:var(--redbg)}
 .dt .d{font-family:var(--mono);font-size:12px;font-weight:700}.dt .n{font-size:9px;margin-top:1px}
 .fx{background:var(--bg);border:1px solid var(--s2);border-radius:var(--r);padding:14px;font-family:var(--mono);font-size:11px;color:var(--accent2);line-height:1.8}
 .empty{text-align:center;padding:40px;color:var(--f3)}.empty h3{color:var(--f2);margin-bottom:4px}
+.dropzone{border:2px dashed var(--s3);border-radius:var(--r);padding:32px;text-align:center;cursor:pointer;transition:all .2s}
+.dropzone:hover,.dropzone.over{border-color:var(--accent);background:rgba(74,144,226,.05)}
+.dropzone .dz-icon{font-size:28px;margin-bottom:8px}
+.dropzone .dz-text{font-size:13px;color:var(--f2);font-weight:600}
+.dropzone .dz-sub{font-size:11px;color:var(--f3);margin-top:4px}
+.dz-file{display:flex;align-items:center;gap:10px;background:var(--s2);border:1px solid var(--s3);border-radius:var(--r);padding:10px 14px;margin-top:10px}
+.dz-file .name{font-weight:600;font-size:13px;flex:1}.dz-file .size{font-size:11px;color:var(--f3);font-family:var(--mono)}
+.val-ok{color:var(--green);font-size:11px}.val-err{color:var(--red);font-size:11px}
+.val-box{background:var(--bg);border:1px solid var(--s2);border-radius:var(--r);padding:14px;margin:12px 0}
+.val-row{display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px}
+.val-icon{width:18px;text-align:center}
 .ig{display:flex;flex-direction:column;gap:5px;margin-bottom:12px}
 .ig label{font-size:10px;font-weight:600;color:var(--f3);text-transform:uppercase;letter-spacing:.3px;font-family:var(--mono)}
 .setup-box{max-width:480px;margin:80px auto;padding:32px}
@@ -184,7 +196,6 @@ function App() {
   const [gd, setGd] = useState("");
   const [q, setQ] = useState("");
   const [iMode, setIMode] = useState("master");
-  const [iTxt, setITxt] = useState("");
   const [toast, setToast] = useState(null);
   const [loading, setLoading] = useState(true);
   const [importing, setImporting] = useState(false);
@@ -197,6 +208,10 @@ function App() {
   const [aiModal, setAiModal] = useState(null);
   const [aiResult, setAiResult] = useState("");
   const [aiLoading, setAiLoading] = useState(false);
+  const [file, setFile] = useState(null); // {name, size, rows:[]}
+  const [validation, setValidation] = useState(null); // {ok, errors:[], data:[], count}
+  const [dragOver, setDragOver] = useState(false);
+  const fileRef = React.useRef(null);
 
   const notify = (m,t)=>{setToast({m,t:t||"ok"});setTimeout(()=>setToast(null),3e3);};
 
@@ -320,82 +335,162 @@ Berikan analisis singkat (3-5 poin):
   const fRows=useMemo(()=>{if(!q)return rows;const s=q.toLowerCase();return rows.filter(r=>r.name.toLowerCase().includes(s)||r.sku.toLowerCase().includes(s));},[rows,q]);
   const belowN=useMemo(()=>rows.filter(r=>r.belowRop).length,[rows]);
 
+  // ─── File Upload & Validation ───
+  const SCHEMAS = {
+    master:   { label:"Master SKU", minCols:4, headers:["SKU","Nama","Kategori","HPP"], altCols:6 },
+    gudang:   { label:"Gudang", minCols:3, headers:["Nama Gudang","Avg Lead Time","Max Lead Time"] },
+    stok:     { label:"Stok per Gudang", minCols:4, headers:["SKU","Nama","Gudang","Stok Aktual"] },
+    raw:      { label:"Sales Harian", minCols:3, headers:["SKU","Tanggal","Qty"] },
+    holidays: { label:"Hari Libur", minCols:1, headers:["Tanggal"] },
+  };
+
+  const processFile = (f) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const wb = XLSX.read(e.target.result, {type:"array"});
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const rows = XLSX.utils.sheet_to_json(ws, {header:1, defval:""});
+        // Remove empty rows
+        const clean = rows.filter(r => r.some(c => c !== "" && c != null));
+        setFile({name:f.name, size:f.size, rows:clean});
+        validateFile(clean, iMode);
+      } catch(err) { notify("File tidak bisa dibaca: "+err.message,"err"); }
+    };
+    reader.readAsArrayBuffer(f);
+  };
+
+  const handleDrop = (e) => { e.preventDefault(); setDragOver(false); const f=e.dataTransfer.files[0]; if(f) processFile(f); };
+  const handleFileSelect = (e) => { const f=e.target.files[0]; if(f) processFile(f); };
+
+  const clearFile = () => { setFile(null); setValidation(null); setRaw(null); if(fileRef.current) fileRef.current.value=""; };
+
+  const validateFile = (rows, mode) => {
+    const schema = SCHEMAS[mode];
+    const errors = [];
+    let data = [];
+
+    if (!rows.length) { setValidation({ok:false, errors:["File kosong"], data:[], count:0}); return; }
+
+    // Detect and skip header row
+    let startRow = 0;
+    const firstCell = String(rows[0]?.[0]||"").trim().toUpperCase();
+    if (["SKU","POC","NAMA","TANGGAL","SKU CODE"].includes(firstCell)) startRow = 1;
+
+    const dataRows = rows.slice(startRow);
+    if (!dataRows.length) { setValidation({ok:false, errors:["Tidak ada data (hanya header)"], data:[], count:0}); return; }
+
+    // Check column count
+    const colCount = dataRows[0].length;
+    if (mode === "master" && colCount !== 4 && colCount !== 6 && colCount < 4) {
+      errors.push("Kolom tidak sesuai: ditemukan "+colCount+" kolom. Butuh 4 (template) atau 6 (Produk Detail).");
+    } else if (mode !== "master" && colCount < schema.minCols) {
+      errors.push("Kolom tidak sesuai: ditemukan "+colCount+" kolom, minimal "+schema.minCols+". Format: "+schema.headers.join(" | "));
+    }
+
+    // Parse data per mode
+    const seen = new Set();
+    let dupCount = 0;
+    let emptyCount = 0;
+
+    if (mode === "master") {
+      dataRows.forEach((r,i) => {
+        let sku,name,kat,hpp;
+        if (r.length >= 6) { sku=String(r[0]||"").trim(); name=String(r[1]||"").trim(); kat=String(r[3]||"").trim(); hpp=parseRp(r[5]); }
+        else { sku=String(r[0]||"").trim(); name=String(r[1]||"").trim(); kat=String(r[2]||"").trim(); hpp=parseRp(r[3]); }
+        if (!sku) { emptyCount++; return; }
+        if (seen.has(sku)) { dupCount++; return; }
+        seen.add(sku);
+        data.push({sku,name,kategori:kat,hpp});
+      });
+    } else if (mode === "gudang") {
+      dataRows.forEach((r) => {
+        const name=String(r[0]||"").trim(); if (!name) { emptyCount++; return; }
+        if (seen.has(name)) { dupCount++; return; }
+        seen.add(name);
+        const aLT=parseInt(r[1])||4, mLT=parseInt(r[2])||5;
+        if (aLT > mLT) errors.push("Gudang '"+name+"': Avg LT ("+aLT+") > Max LT ("+mLT+")");
+        data.push({name,avg_lt:aLT,max_lt:mLT});
+      });
+    } else if (mode === "stok") {
+      dataRows.forEach((r) => {
+        const sku=String(r[0]||"").trim(), gudang=String(r[2]||"").trim();
+        if (!sku) { emptyCount++; return; }
+        if (!gudang) { errors.push("Baris SKU '"+sku+"': kolom Gudang kosong"); return; }
+        const key=sku+"|"+gudang;
+        if (seen.has(key)) { dupCount++; return; }
+        seen.add(key);
+        data.push({sku,gudang,qty:parseInt(r[3])||0,updated_at:new Date().toISOString()});
+      });
+    } else if (mode === "raw") {
+      const dateMap = new Map();
+      dataRows.forEach((r) => {
+        let sku=String(r[0]||"").trim(); if(sku.includes("\n")) sku=sku.split("\n")[0].trim();
+        if (!sku) { emptyCount++; return; }
+        let gudang,ds,qty;
+        if (r.length>=4 && parseDate(String(r[2]||"").trim())) { gudang=String(r[1]||"").trim(); ds=String(r[2]||"").trim(); qty=parseInt(r[3])||0; }
+        else { gudang=""; ds=String(r[1]||"").trim(); qty=parseInt(r[2])||0; }
+        const d=parseDate(ds); if(!d){ if(ds) errors.push("Tanggal tidak dikenali: '"+ds+"' (baris SKU "+sku+")"); return; }
+        const k=dk(d); dateMap.set(k,d);
+        data.push({sku,gudang,date:k,qty});
+      });
+      // Build raw state for date exclusion UI
+      const sortedDates=[...dateMap.entries()].sort((a,b)=>a[1]-b[1]).map(e=>({key:e[0],d:e[1]}));
+      setRaw({entries:data,sortedDates,total:data.length,hasGd:data.some(e=>e.gudang)});
+      setExD(new Set());
+    } else if (mode === "holidays") {
+      dataRows.forEach((r) => {
+        const s=String(r[0]||"").trim(); if (!s) { emptyCount++; return; }
+        const d=parseDate(s); if(!d){ errors.push("Tanggal tidak dikenali: '"+s+"'"); return; }
+        const k=dk(d);
+        if (seen.has(k)) { dupCount++; return; }
+        seen.add(k);
+        data.push({date:k});
+      });
+    }
+
+    if (dupCount > 0) errors.push(dupCount+" baris duplikat dihapus otomatis.");
+    if (emptyCount > 0) errors.push(emptyCount+" baris kosong di-skip.");
+    if (data.length === 0 && errors.length === 0) errors.push("Tidak ada data valid yang ditemukan.");
+
+    const hasBlocker = errors.some(e => e.includes("Kolom tidak sesuai") || e.includes("Tidak ada data valid"));
+    setValidation({ok: !hasBlocker && data.length > 0, errors, data, count: data.length});
+  };
+
   // ─── Import to Supabase ───
   const dedup = (arr, keyFn) => { const m = new Map(); arr.forEach(item => m.set(keyFn(item), item)); return [...m.values()]; };
 
   const handleImport = async()=>{
     if(iMode==="raw"&&raw) return handleImportRaw();
-    if(!iTxt.trim()||!sb) return notify("Data kosong","err");
+    if(!validation||!validation.ok||!sb) return notify("Data tidak valid atau belum upload file","err");
     setImporting(true);
-    const lines=iTxt.trim().split("\n").filter(l=>l.trim());
-    let c=0;
+    const d = validation.data;
+    let c = d.length;
     try{
       if(iMode==="master"){
-        const a=[];
-        lines.forEach(l=>{const p=l.split("\t");if(p.length<2||(p[0]||"").trim().toUpperCase()==="SKU"||
-          (p[0]||"").trim().toUpperCase()==="POC")return;
-          // Auto-detect: 6 cols = Produk Detail (SKU,Nama,ProdukUtama,Kategori,Atribut,HPP)
-          //              4 cols = Template (SKU,Nama,Kategori,HPP)
-          let sku,name,kat,hpp;
-          if(p.length>=6){ sku=(p[0]||"").trim(); name=(p[1]||"").trim(); kat=(p[3]||"").trim(); hpp=parseRp(p[5]); }
-          else { sku=(p[0]||"").trim(); name=(p[1]||"").trim(); kat=(p[2]||"").trim(); hpp=parseRp(p[3]); }
-          if(sku) a.push({sku,name,kategori:kat,hpp});
-        });
-        const unique = dedup(a, r=>r.sku); c=unique.length;
         await deleteAll(sb, "master_sku", "sku");
-        await chunk(unique, 200, batch => sb.from("master_sku").insert(batch));
+        await chunk(d, 200, batch => sb.from("master_sku").insert(batch));
       } else if(iMode==="gudang"){
-        const a=[];
-        lines.forEach(l=>{const p=l.split("\t");if(p.length<3||(p[0]||"").trim().toUpperCase()==="NAMA")return;
-          a.push({name:(p[0]||"").trim(),avg_lt:parseInt(p[1])||4,max_lt:parseInt(p[2])||5});});
-        const unique = dedup(a, r=>r.name); c=unique.length;
         await deleteAll(sb, "gudang", "name");
-        await chunk(unique, 200, batch => sb.from("gudang").insert(batch));
+        await chunk(d, 200, batch => sb.from("gudang").insert(batch));
       } else if(iMode==="stok"){
-        const a=[];
-        lines.forEach(l=>{const p=l.split("\t");if(p.length<4||(p[0]||"").trim().toUpperCase()==="SKU")return;
-          a.push({sku:(p[0]||"").trim(),gudang:(p[2]||"").trim(),qty:parseInt(p[3])||0,updated_at:new Date().toISOString()});});
-        const unique = dedup(a, r=>r.sku+"|"+r.gudang); c=unique.length;
         await deleteAll(sb, "stok", "sku");
-        await chunk(unique, 200, batch => sb.from("stok").insert(batch));
+        await chunk(d, 200, batch => sb.from("stok").insert(batch));
       } else if(iMode==="holidays"){
-        const a=[];
-        lines.forEach(l=>{const p=l.split("\t");if((p[0]||"").trim().toUpperCase()==="TANGGAL")return;
-          const d=parseDate((p[0]||"").trim());if(d){a.push({date:dk(d)});}});
-        const unique = dedup(a, r=>r.date); c=unique.length;
         await deleteAll(sb, "holidays", "date");
-        await chunk(unique, 200, batch => sb.from("holidays").insert(batch));
+        await chunk(d, 200, batch => sb.from("holidays").insert(batch));
       }
       await loadAll();
-      setITxt("");
-      // Auto-open viewer after import
+      clearFile();
       if(iMode==="master") setViewData("master");
       else if(iMode==="stok") setViewData("stok");
-      notify(c+" data diimport (duplikat dihapus otomatis)");
+      notify(c+" data berhasil diimport");
     } catch(e){ notify("Error: "+e.message,"err"); }
     setImporting(false);
   };
 
-  // ─── Parse raw ───
-  const doParseRaw=()=>{
-    if(!iTxt.trim())return;
-    const lines=iTxt.trim().split("\n").filter(l=>l.trim());
-    const entries=[];const dateMap=new Map();
-    lines.forEach(l=>{
-      const p=l.split("\t");if(p.length<3||(p[0]||"").trim().toUpperCase()==="SKU")return;
-      let sku=(p[0]||"").trim();if(sku.includes("\n"))sku=sku.split("\n")[0].trim();
-      let gudang,ds,qty;
-      if(p.length>=4&&parseDate((p[2]||"").trim())){gudang=(p[1]||"").trim();ds=(p[2]||"").trim();qty=parseInt(p[3])||0;}
-      else{gudang="";ds=(p[1]||"").trim();qty=parseInt(p[2])||0;}
-      const d=parseDate(ds);if(!d||!sku)return;
-      const k=dk(d);dateMap.set(k,d);entries.push({sku,gudang,date:k,qty});
-    });
-    const sortedDates=[...dateMap.entries()].sort((a,b)=>a[1]-b[1]).map(e=>({key:e[0],d:e[1]}));
-    setRaw({entries,sortedDates,total:entries.length,hasGd:entries.some(e=>e.gudang)});setExD(new Set());
-  };
-
   const handleImportRaw=async()=>{
-    if(!raw||!sb)return;
+    if(!raw||!sb||!validation) return;
     setImporting(true);
     try{
       const filtered=raw.entries.filter(e=>!exD.has(e.date));
@@ -404,28 +499,18 @@ Berikan analisis singkat (3-5 poin):
         const stokBySku={};db.stok.forEach(s=>{if(!stokBySku[s.sku])stokBySku[s.sku]=[];stokBySku[s.sku].push(s.gudang);});
         filtered.forEach(e=>{const gs=stokBySku[e.sku]||(db.gudang.length?[db.gudang[0].name]:[]);gs.forEach(g=>final.push({sku:e.sku,gudang:g,date:e.date,qty:e.qty}));});
       } else { final=filtered.map(e=>({sku:e.sku,gudang:e.gudang,date:e.date,qty:e.qty})); }
-
-      // Delete existing sales for these dates, then insert
       const importDates=[...new Set(raw.sortedDates.filter(d=>!exD.has(d.key)).map(d=>d.key))];
-      for(const dt of importDates){
-        let more=true; while(more){ const r=await sb.from("sales").delete().eq("date",dt).select("sku").limit(1000); more=r.data&&r.data.length===1000; }
-      }
+      for(const dt of importDates){ let more=true; while(more){ const r=await sb.from("sales").delete().eq("date",dt).select("sku").limit(1000); more=r.data&&r.data.length===1000; } }
       const uniqueSales = dedup(final, r=>r.sku+"|"+r.gudang+"|"+r.date);
       await chunk(uniqueSales, 200, batch => sb.from("sales").insert(batch));
-
-      // Add excluded dates as holidays
-      if(exD.size>0){
-        const hols=dedup([...exD].map(d=>({date:d})), r=>r.date);
-        await sb.from("holidays").upsert(hols, {onConflict:"date",ignoreDuplicates:true});
-      }
-
+      if(exD.size>0){ const hols=dedup([...exD].map(d=>({date:d})), r=>r.date); await sb.from("holidays").upsert(hols, {onConflict:"date",ignoreDuplicates:true}); }
       await loadAll();
-      setITxt("");setRaw(null);notify(final.length+" sales diimport");
+      clearFile(); notify(uniqueSales.length+" sales diimport");
     } catch(e){ notify("Error: "+e.message,"err"); }
     setImporting(false);
   };
 
-  const handleExport=()=>{
+    const handleExport=()=>{
     if(!gd)return;
     const h="SKU\tNama\tStok\tAvg7d\tMax7d\tSS\tROP\tOrderQty\tDays\tStatus";
     const r=rows.map(r=>[r.sku,r.name,r.stock,r.avg.toFixed(1),r.max,r.ss,r.rop,r.oq,r.dos===Infinity?"∞":r.dos.toFixed(1),r.belowRop?"REORDER":"AMAN"].join("\t"));
@@ -533,28 +618,90 @@ Berikan analisis singkat (3-5 poin):
 
       {/* IMPORT */}
       {tab==="import"&&<div>
-        <div className="ph"><h2>Import Data</h2><span>Paste dari Excel template</span></div>
+        <div className="ph"><h2>Import Data</h2><span>Upload file Excel (.xlsx)</span></div>
         <div className="it">
           {[["master","Master SKU"],["gudang","Gudang"],["stok","Stok per Gudang"],["raw","Sales Harian"],["holidays","Hari Libur"]].map(([k,l])=>
-            <div key={k} className={"itm"+(iMode===k?" on":"")} onClick={()=>{setIMode(k);setRaw(null);}}>{l}</div>
+            <div key={k} className={"itm"+(iMode===k?" on":"")} onClick={()=>{setIMode(k);clearFile();}}>{l}</div>
           )}
         </div>
+
         <div className="cd"><div className="cb">
-          {iMode==="master"&&<div className="ib"><div className="ib-t">Sheet: Master SKU</div><div className="ht">Paste langsung dari sheet <b>Produk Detail</b> (6 kolom) atau template Master SKU (4 kolom) — otomatis dikenali.<br/>⚠️ Data lama ditimpa. Header otomatis di-skip.</div></div>}
-          {iMode==="gudang"&&<div className="ib"><div className="ib-t">Sheet: Gudang</div><div className="ht">Paste A–C tanpa header: <code>Nama Gudang [tab] Avg LT [tab] Max LT</code></div></div>}
-          {iMode==="stok"&&<div className="ib"><div className="ib-t">Sheet: Stok per Gudang</div><div className="ht">Paste A–D tanpa header: <code>SKU [tab] Nama [tab] Gudang [tab] Stok Aktual</code></div></div>}
-          {iMode==="holidays"&&<div className="ib"><div className="ib-t">Sheet: Hari Libur</div><div className="ht">Paste kolom A tanpa header: <code>Tanggal</code> (format: 1 Mar 2026)</div></div>}
-          {iMode==="raw"&&<div className="ib"><div className="ib-t">Sheet: Sales Harian</div><div className="ht">
-            <b>Dgn gudang:</b> <code>SKU [tab] Gudang [tab] Tanggal [tab] Qty</code><br/>
-            <b>Tanpa gudang:</b> <code>SKU [tab] Tanggal [tab] Qty</code><br/><br/>
-            Paste → Parse → exclude hari libur → Import
+          {/* Format info */}
+          {iMode==="master"&&<div className="ib"><div className="ib-t">Sheet: Master SKU</div><div className="ht">
+            Format 4 kolom: <code>SKU | Nama | Kategori | HPP</code><br/>
+            Atau 6 kolom dari Produk Detail: <code>SKU | Nama | Produk Utama | Kategori | Atribut | HPP</code><br/>
+            ⚠️ Data lama akan <b>ditimpa</b>. Header otomatis di-skip.
           </div></div>}
+          {iMode==="gudang"&&<div className="ib"><div className="ib-t">Sheet: Gudang</div><div className="ht">Format: <code>Nama Gudang | Avg Lead Time | Max Lead Time</code></div></div>}
+          {iMode==="stok"&&<div className="ib"><div className="ib-t">Sheet: Stok per Gudang</div><div className="ht">Format: <code>SKU | Nama | Gudang | Stok Aktual</code></div></div>}
+          {iMode==="raw"&&<div className="ib"><div className="ib-t">Sheet: Sales Harian</div><div className="ht">
+            <b>Dgn gudang (4 kolom):</b> <code>SKU | Gudang | Tanggal | Qty</code><br/>
+            <b>Tanpa gudang (3 kolom):</b> <code>SKU | Tanggal | Qty</code><br/>
+            Upload → validasi → exclude hari libur → Import
+          </div></div>}
+          {iMode==="holidays"&&<div className="ib"><div className="ib-t">Sheet: Hari Libur</div><div className="ht">Format: <code>Tanggal</code> (1 kolom, format: 1 Mar 2026)</div></div>}
 
-          <textarea value={iTxt} onChange={e=>{setITxt(e.target.value);setRaw(null);}} placeholder="Paste data di sini..."/>
+          {/* Drop Zone */}
+          {!file&&<div className={"dropzone"+(dragOver?" over":"")}
+            onDragOver={e=>{e.preventDefault();setDragOver(true);}} onDragLeave={()=>setDragOver(false)}
+            onDrop={handleDrop} onClick={()=>fileRef.current?.click()}>
+            <div className="dz-icon">📂</div>
+            <div className="dz-text">Drag file Excel di sini, atau klik untuk browse</div>
+            <div className="dz-sub">Format: .xlsx, .xls, .csv</div>
+            <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" style={{display:"none"}} onChange={handleFileSelect}/>
+          </div>}
 
-          {iMode==="raw"&&iTxt.trim()&&!raw&&<button className="btn bp" style={{marginTop:8}} onClick={doParseRaw}>⚡ Parse</button>}
+          {/* File info */}
+          {file&&<div>
+            <div className="dz-file">
+              <span style={{fontSize:20}}>📄</span>
+              <span className="name">{file.name}</span>
+              <span className="size">{(file.size/1024).toFixed(0)} KB · {file.rows.length} baris</span>
+              <button className="btn bsm bs" onClick={clearFile}>✕</button>
+            </div>
 
-          {raw&&<div style={{marginTop:14}}>
+            {/* Validation results */}
+            {validation&&<div className="val-box">
+              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+                <span style={{fontSize:16}}>{validation.ok?"✅":"❌"}</span>
+                <span style={{fontWeight:700,fontSize:13,color:validation.ok?"var(--green)":"var(--red)"}}>
+                  {validation.ok?validation.count+" data valid — siap import":"Validasi gagal"}
+                </span>
+              </div>
+              {validation.errors.map((e,i)=><div key={i} className="val-row">
+                <span className="val-icon">{e.includes("duplikat")||e.includes("di-skip")?"⚠️":"❌"}</span>
+                <span style={{color:e.includes("duplikat")||e.includes("di-skip")?"var(--orange)":"var(--red)"}}>{e}</span>
+              </div>)}
+              {validation.ok&&validation.count>0&&<div className="val-row"><span className="val-icon">📊</span><span style={{color:"var(--f2)"}}>
+                {iMode==="master"?"SKU: "+validation.count+" produk":
+                 iMode==="gudang"?validation.count+" gudang":
+                 iMode==="stok"?validation.count+" stok records":
+                 iMode==="raw"?validation.count+" sales entries":
+                 validation.count+" tanggal"}</span></div>}
+            </div>}
+
+            {/* Preview table (first 5 rows) */}
+            {validation&&validation.ok&&validation.count>0&&iMode!=="raw"&&<div className="tw" style={{maxHeight:200,overflowY:"auto",marginBottom:12}}>
+              <table><thead><tr>
+                {iMode==="master"&&<><th>#</th><th>SKU</th><th>Nama</th><th>Kategori</th><th>HPP</th></>}
+                {iMode==="gudang"&&<><th>#</th><th>Nama</th><th>Avg LT</th><th>Max LT</th></>}
+                {iMode==="stok"&&<><th>#</th><th>SKU</th><th>Gudang</th><th>Qty</th></>}
+                {iMode==="holidays"&&<><th>#</th><th>Tanggal</th></>}
+              </tr></thead><tbody>
+                {validation.data.slice(0,5).map((r,i)=><tr key={i}>
+                  <td style={{color:"var(--f3)",fontSize:10}}>{i+1}</td>
+                  {iMode==="master"&&<><td className="m" style={{fontSize:11}}>{r.sku}</td><td style={{fontWeight:600}}>{r.name}</td><td>{r.kategori}</td><td className="mr">{r.hpp||"-"}</td></>}
+                  {iMode==="gudang"&&<><td style={{fontWeight:600}}>{r.name}</td><td className="mr">{r.avg_lt}</td><td className="mr">{r.max_lt}</td></>}
+                  {iMode==="stok"&&<><td className="m" style={{fontSize:11}}>{r.sku}</td><td>{r.gudang}</td><td className="mr">{r.qty}</td></>}
+                  {iMode==="holidays"&&<><td className="m">{r.date}</td></>}
+                </tr>)}
+                {validation.count>5&&<tr><td colSpan={5} style={{textAlign:"center",color:"var(--f3)",fontSize:11}}>...dan {validation.count-5} baris lainnya</td></tr>}
+              </tbody></table>
+            </div>}
+          </div>}
+
+          {/* Raw sales date exclusion */}
+          {iMode==="raw"&&raw&&<div style={{marginTop:14}}>
             <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(110px,1fr))",gap:8,marginBottom:10}}>
               <div className="sc"><div className="sc-l">Baris</div><div className="sc-v" style={{fontSize:18}}>{raw.total}</div></div>
               <div className="sc"><div className="sc-l">Tanggal</div><div className="sc-v" style={{fontSize:18}}>{raw.sortedDates.length}</div></div>
@@ -572,17 +719,20 @@ Berikan analisis singkat (3-5 poin):
             <div className="ht">{raw.sortedDates.length-exD.size} aktif{exD.size>0&&<span style={{color:"var(--orange)"}}> · {exD.size} excluded</span>}</div>
           </div>}
 
-          <div style={{marginTop:10,display:"flex",gap:8,alignItems:"center"}}>
+          {/* Import buttons */}
+          {file&&<div style={{marginTop:12,display:"flex",gap:8,alignItems:"center"}}>
             {iMode!=="raw"&&<React.Fragment>
-              <button className="btn bp" onClick={handleImport} disabled={importing}>{importing?<><span className="spinner"/> Importing...</>:"Import"}</button>
-              <button className="btn bs" onClick={()=>setITxt("")}>Clear</button>
-              {iTxt.trim()&&!importing&&<span className="ht">{iTxt.trim().split("\n").filter(l=>l.trim()).length} baris</span>}
+              <button className="btn bp" onClick={handleImport} disabled={importing||!validation?.ok}>
+                {importing?<><span className="spinner"/> Importing...</>:"📥 Import "+SCHEMAS[iMode].label}
+              </button>
             </React.Fragment>}
             {iMode==="raw"&&raw&&<React.Fragment>
-              <button className="btn bp" onClick={handleImportRaw} disabled={importing}>{importing?<><span className="spinner"/> Importing...</>:"📈 Import Sales"}</button>
-              <button className="btn bs" onClick={()=>{setITxt("");setRaw(null);}}>Reset</button>
+              <button className="btn bp" onClick={handleImportRaw} disabled={importing}>
+                {importing?<><span className="spinner"/> Importing...</>:"📈 Import Sales"}
+              </button>
             </React.Fragment>}
-          </div>
+            <button className="btn bs" onClick={clearFile}>Reset</button>
+          </div>}
         </div></div>
 
         <div className="cd"><div className="ch"><h3>Status Data (Supabase)</h3><button className="btn bsm bs" onClick={()=>{setLoading(true);loadAll();}}>🔄 Refresh</button></div><div className="cb">
