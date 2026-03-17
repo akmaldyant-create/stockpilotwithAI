@@ -362,13 +362,26 @@ Berikan analisis singkat (3-5 poin):
     const stokMap={};
     db.stok.filter(s=>s.gudang===gd).forEach(s=>{stokMap[s.sku]=s.qty;});
     const allSkus=new Set([...Object.keys(stokMap),...Object.keys(bySku)]);
+
+    // Build 7 calendar days: yesterday back to 7 days ago (exclude today)
+    const today = new Date(); today.setHours(0,0,0,0);
+    const last7dates = [];
+    for(let i=1;i<=7;i++){
+      const d=new Date(today); d.setDate(d.getDate()-i);
+      const k=dk(d);
+      if(!holSet.has(k)) last7dates.unshift(k); // oldest first
+    }
+
     const out=[];
     allSkus.forEach(sku=>{
       const mi=db.master.find(m=>m.sku===sku);const stock=stokMap[sku]||0;
-      const sm=bySku[sku]||{};const days=Object.keys(sm).sort();const last7=days.slice(-7).map(d=>sm[d]);
+      const sm=bySku[sku]||{};
+      // Get sales for exactly the 7 calendar days (0 if no sale that day)
+      const last7=last7dates.map(d=>sm[d]||0);
+      const hasSales=last7.some(v=>v>0);
       const kf=kingFormula(last7,g.avgLT,g.maxLT,stock);
       const ta=analyzeTrend(last7,g.avgLT,g.maxLT,stock);
-      out.push({sku,name:mi?mi.name:sku,kat:mi?mi.kat:"",stock,last7,...kf,hasSales:last7.length>0,...ta});
+      out.push({sku,name:mi?mi.name:sku,kat:mi?mi.kat:"",stock,last7,last7dates,...kf,hasSales,...ta});
     });
     out.sort((a,b)=>{
       if(sort==="rop"){if(a.belowRop!==b.belowRop)return a.belowRop?-1:1;return b.oq-a.oq;}
@@ -669,7 +682,10 @@ Berikan analisis singkat (3-5 poin):
           {fRows.length===0&&<div className="empty"><p>{q?"Tidak ditemukan":"Belum ada data"}</p></div>}
           </div>
           <div style={{marginTop:10,fontSize:11,color:"var(--f3)",display:"flex",gap:16,flexWrap:"wrap"}}>
-            <span>King Formula · 7 hari · +1 review</span>
+            <span>King Formula · Data: {(()=>{
+              const t=new Date();t.setHours(0,0,0,0);const d7=new Date(t);d7.setDate(d7.getDate()-7);const d1=new Date(t);d1.setDate(d1.getDate()-1);
+              return fmtD(d7)+" → "+fmtD(d1);
+            })()} (7 hari kemarin)</span>
             <span>Trend: ⬆↗ naik · →stabil · ↘⬇ turun</span>
             <span>Adj Qty = order disesuaikan tren</span>
             <span>{db.holidays.length} hari libur excluded</span>
