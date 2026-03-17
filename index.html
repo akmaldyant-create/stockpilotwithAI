@@ -335,9 +335,9 @@ Berikan analisis singkat (3-5 poin):
       ]);
       setDb({
         master:m.map(r=>({sku:r.sku,name:r.name,kat:r.kategori||"",hpp:r.hpp||0})),
-        gudang:g.map(r=>({name:r.name,avgLT:r.avg_lt,maxLT:r.max_lt})),
-        stok:st.map(r=>({sku:r.sku,gudang:r.gudang,qty:r.qty})),
-        sales:sl.map(r=>({sku:r.sku,gudang:r.gudang,date:r.date,qty:r.qty})),
+        gudang:g.map(r=>({name:r.name.toUpperCase(),avgLT:r.avg_lt,maxLT:r.max_lt})),
+        stok:st.map(r=>({sku:r.sku,gudang:r.gudang.toUpperCase(),qty:r.qty})),
+        sales:sl.map(r=>({sku:r.sku,gudang:r.gudang.toUpperCase(),date:r.date,qty:r.qty})),
         holidays:h.map(r=>r.date),
       });
       setConnErr("");
@@ -455,7 +455,7 @@ Berikan analisis singkat (3-5 poin):
       });
     } else if (mode === "gudang") {
       dataRows.forEach((r) => {
-        const name=String(r[0]||"").trim(); if (!name) { emptyCount++; return; }
+        const name=String(r[0]||"").trim().toUpperCase(); if (!name) { emptyCount++; return; }
         if (seen.has(name)) { dupCount++; return; }
         seen.add(name);
         const aLT=parseInt(r[1])||4, mLT=parseInt(r[2])||5;
@@ -464,7 +464,7 @@ Berikan analisis singkat (3-5 poin):
       });
     } else if (mode === "stok") {
       dataRows.forEach((r) => {
-        const sku=String(r[0]||"").trim(), gudang=String(r[2]||"").trim();
+        const sku=String(r[0]||"").trim(), gudang=String(r[2]||"").trim().toUpperCase();
         if (!sku) { emptyCount++; return; }
         if (!gudang) { errors.push("Baris SKU '"+sku+"': kolom Gudang kosong"); return; }
         const key=sku+"|"+gudang;
@@ -483,7 +483,7 @@ Berikan analisis singkat (3-5 poin):
         let gudang,dateVal,qty;
         // Detect format: 4 cols = SKU|Gudang|Date|Qty, 3 cols = SKU|Date|Qty
         const col2 = r[2]; const col2parsed = parseDate(col2);
-        if (r.length>=4 && col2parsed) { gudang=String(r[1]||"").trim(); dateVal=col2; qty=parseInt(r[3])||0; }
+        if (r.length>=4 && col2parsed) { gudang=String(r[1]||"").trim().toUpperCase(); dateVal=col2; qty=parseInt(r[3])||0; }
         else { gudang=""; dateVal=r[1]; qty=parseInt(r[2])||0; }
         const d=parseDate(dateVal);
         if(!d){ dateErrors++; if(dateErrors<=3) errors.push("Tanggal tidak dikenali: '"+String(dateVal)+"' (SKU: "+sku+")"); return; }
