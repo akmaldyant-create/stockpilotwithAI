@@ -103,7 +103,36 @@ const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZ
 
 // ─── Date/Format helpers ───
 const MO={jan:0,feb:1,mar:2,apr:3,may:4,jun:5,jul:6,aug:7,sep:8,oct:9,nov:10,dec:11};
-function parseDate(s){if(!s)return null;const m=String(s).trim().match(/^(\d{1,2})\s+([a-z]+)\s+(\d{4})$/i);if(m){const mo=MO[m[2].slice(0,3).toLowerCase()];if(mo!==undefined)return new Date(+m[3],mo,+m[1]);}const d=new Date(String(s).trim());return isNaN(d.getTime())?null:d;}
+
+// Extract value from Google Sheets IFERROR(DUMMYFUNCTION(...), "actual_value")
+function extractCell(v) {
+  if (v == null) return "";
+  const s = String(v);
+  // Google Sheets QUERY formula: =IFERROR(__xludf.DUMMYFUNCTION("COMPUTED_VALUE"), "actual")
+  const m = s.match(/DUMMYFUNCTION\([^)]*\)\s*,\s*(.+?)\s*\)$/);
+  if (m) {
+    let val = m[1].trim();
+    if (val.startsWith('"') && val.endsWith('"')) return val.slice(1,-1); // string value
+    return parseFloat(val) || val; // numeric value
+  }
+  return v; // not a formula, return as-is
+}
+
+function parseDate(s){
+  if(!s) return null;
+  // Excel serial number (e.g. 46025 = Jan 3, 2026)
+  const num = typeof s === "number" ? s : parseFloat(String(s).trim());
+  if (!isNaN(num) && num > 40000 && num < 60000) {
+    const d = new Date((num - 25569) * 86400000); // Excel epoch to JS epoch
+    if (!isNaN(d.getTime())) return d;
+  }
+  const str = String(s).trim();
+  // "10 Mar 2026" format
+  const m = str.match(/^(\d{1,2})\s+([a-z]+)\s+(\d{4})$/i);
+  if(m){const mo=MO[m[2].slice(0,3).toLowerCase()];if(mo!==undefined)return new Date(+m[3],mo,+m[1]);}
+  // "2026-03-10" or other JS parseable formats
+  const d=new Date(str);return isNaN(d.getTime())?null:d;
+}
 function dk(d){return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0");}
 function fmtD(d){return d.getDate()+" "+["Jan","Feb","Mar","Apr","Mei","Jun","Jul","Agu","Sep","Okt","Nov","Des"][d.getMonth()];}
 function fmt(n){if(!isFinite(n)||isNaN(n))return n===Infinity?"∞":"-";return n.toLocaleString("id-ID",{maximumFractionDigits:1});}
@@ -351,8 +380,10 @@ Berikan analisis singkat (3-5 poin):
         const wb = XLSX.read(e.target.result, {type:"array"});
         const ws = wb.Sheets[wb.SheetNames[0]];
         const rows = XLSX.utils.sheet_to_json(ws, {header:1, defval:""});
-        // Remove empty rows
-        const clean = rows.filter(r => r.some(c => c !== "" && c != null));
+        // Extract actual values from Google Sheets IFERROR formulas + remove empty rows
+        const clean = rows
+          .map(r => r.map(c => extractCell(c)))
+          .filter(r => r.some(c => c !== "" && c != null));
         setFile({name:f.name, size:f.size, rows:clean});
         validateFile(clean, iMode);
       } catch(err) { notify("File tidak bisa dibaca: "+err.message,"err"); }
@@ -424,19 +455,30 @@ Berikan analisis singkat (3-5 poin):
       });
     } else if (mode === "raw") {
       const dateMap = new Map();
+      const gudangSet = new Set();
+      const skuSet = new Set();
+      let dateErrors = 0;
       dataRows.forEach((r) => {
         let sku=String(r[0]||"").trim(); if(sku.includes("\n")) sku=sku.split("\n")[0].trim();
         if (!sku) { emptyCount++; return; }
-        let gudang,ds,qty;
-        if (r.length>=4 && parseDate(String(r[2]||"").trim())) { gudang=String(r[1]||"").trim(); ds=String(r[2]||"").trim(); qty=parseInt(r[3])||0; }
-        else { gudang=""; ds=String(r[1]||"").trim(); qty=parseInt(r[2])||0; }
-        const d=parseDate(ds); if(!d){ if(ds) errors.push("Tanggal tidak dikenali: '"+ds+"' (baris SKU "+sku+")"); return; }
+        let gudang,dateVal,qty;
+        // Detect format: 4 cols = SKU|Gudang|Date|Qty, 3 cols = SKU|Date|Qty
+        const col2 = r[2]; const col2parsed = parseDate(col2);
+        if (r.length>=4 && col2parsed) { gudang=String(r[1]||"").trim(); dateVal=col2; qty=parseInt(r[3])||0; }
+        else { gudang=""; dateVal=r[1]; qty=parseInt(r[2])||0; }
+        const d=parseDate(dateVal);
+        if(!d){ dateErrors++; if(dateErrors<=3) errors.push("Tanggal tidak dikenali: '"+String(dateVal)+"' (SKU: "+sku+")"); return; }
         const k=dk(d); dateMap.set(k,d);
+        if(gudang) gudangSet.add(gudang);
+        skuSet.add(sku);
         data.push({sku,gudang,date:k,qty});
       });
+      if(dateErrors>3) errors.push("...dan "+(dateErrors-3)+" tanggal error lainnya");
       // Build raw state for date exclusion UI
       const sortedDates=[...dateMap.entries()].sort((a,b)=>a[1]-b[1]).map(e=>({key:e[0],d:e[1]}));
-      setRaw({entries:data,sortedDates,total:data.length,hasGd:data.some(e=>e.gudang)});
+      const dateRange = sortedDates.length>0 ? fmtD(sortedDates[0].d)+" "+sortedDates[0].d.getFullYear()+" → "+fmtD(sortedDates[sortedDates.length-1].d)+" "+sortedDates[sortedDates.length-1].d.getFullYear() : "-";
+      setRaw({entries:data,sortedDates,total:data.length,hasGd:gudangSet.size>0,
+        gudangList:[...gudangSet].sort(), skuCount:skuSet.size, dateRange});
       setExD(new Set());
     } else if (mode === "holidays") {
       dataRows.forEach((r) => {
@@ -702,11 +744,31 @@ Berikan analisis singkat (3-5 poin):
 
           {/* Raw sales date exclusion */}
           {iMode==="raw"&&raw&&<div style={{marginTop:14}}>
-            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(110px,1fr))",gap:8,marginBottom:10}}>
-              <div className="sc"><div className="sc-l">Baris</div><div className="sc-v" style={{fontSize:18}}>{raw.total}</div></div>
+            {/* Summary cards */}
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(130px,1fr))",gap:8,marginBottom:12}}>
+              <div className="sc"><div className="sc-l">Total Baris</div><div className="sc-v" style={{fontSize:18}}>{raw.total}</div></div>
+              <div className="sc"><div className="sc-l">SKU Unik</div><div className="sc-v" style={{fontSize:18}}>{raw.skuCount}</div></div>
               <div className="sc"><div className="sc-l">Tanggal</div><div className="sc-v" style={{fontSize:18}}>{raw.sortedDates.length}</div></div>
               <div className="sc"><div className="sc-l">Per Gudang</div><div className="sc-v" style={{fontSize:18}}>{raw.hasGd?"Ya":"Tidak"}</div></div>
             </div>
+
+            {/* Detailed validation info */}
+            <div className="val-box">
+              <div className="val-row"><span className="val-icon">📅</span><span><b>Periode:</b> {raw.dateRange}</span></div>
+              {raw.hasGd&&<div className="val-row"><span className="val-icon">🏭</span><span><b>Gudang terdeteksi:</b> {raw.gudangList.join(", ")}</span></div>}
+              <div className="val-row"><span className="val-icon">📦</span><span><b>SKU terdaftar di master:</b> {
+                (()=>{const matched=new Set(); raw.entries.forEach(e=>{if(db.master.some(m=>m.sku===e.sku)) matched.add(e.sku);});
+                  const total=raw.skuCount; const m=matched.size; const unm=total-m;
+                  return <>{m} dari {total} cocok{unm>0&&<span style={{color:"var(--orange)"}}> · {unm} SKU tidak ditemukan di master</span>}</>;
+                })()
+              }</span></div>
+              {raw.hasGd&&<div className="val-row"><span className="val-icon">📍</span><span><b>Gudang terdaftar:</b> {
+                (()=>{const regGd=db.gudang.map(g=>g.name.toUpperCase()); const unknown=raw.gudangList.filter(g=>!regGd.includes(g.toUpperCase()));
+                  return unknown.length>0?<span style={{color:"var(--orange)"}}>{unknown.join(", ")} belum terdaftar di master gudang</span>:<span style={{color:"var(--green)"}}>Semua gudang cocok ✓</span>;
+                })()
+              }</span></div>}
+            </div>
+
             <div style={{fontWeight:600,fontSize:12,marginBottom:6}}>Klik untuk exclude hari libur:</div>
             <div className="dtg">{raw.sortedDates.map(({key,d})=>{
               const ex=exD.has(key);const we=d.getDay()===0||d.getDay()===6;
